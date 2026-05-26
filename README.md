@@ -4,19 +4,32 @@ Assigns a single Discord role to a large list of users. Reads User IDs from Goog
 
 ---
 
-## Workflow (7 nodes)
+## Workflow (9 nodes + sticky note)
 
 ```
 [Trigger]
-  → Read Config        — reads guild_id and role_id from a single sheet row
-  → Get Pending Users  — fetches rows where status is blank
-  → Loop               — processes one user at a time
-  → Add Discord Role   — native Discord node, credential attached directly
-  → Update Row Status  — writes done/failed back to the sheet
-  → back to Loop
+  → Read Config           — reads guild_id and role_id from a single Config row
+  → Get Pending Users     — fetches rows where status is blank
+  → Outer Loop (50)       — processes users in batches of 50
+      → Add Discord Role  — native Discord node, all 50 items in the batch
+      → Inner Loop (1)    — feeds results to Sheets one at a time
+          → Sheets Delay  — 1-second throttle between writes
+          → Update Row Status
+          → back to Inner Loop
+      ↩ Inner Loop "done" → back to Outer Loop
 ```
 
-The "done" output of the Loop node is **left unconnected** — the workflow ends naturally when all pending users are processed.
+**Why two loops?**
+Discord can handle 50 role assignments in a batch quickly. Google Sheets write quota (~60/min) means we must pace each write. The outer loop handles Discord throughput; the inner loop throttles only the Sheets writes.
+
+**Loop output wiring (critical):**
+
+| Node | Output index | Connects to |
+|------|-------------|-------------|
+| Outer Loop "done" | 0 | *(unconnected)* |
+| Outer Loop "loop" | 1 | Add Discord Role |
+| Inner Loop "done" | 0 | Outer Loop input |
+| Inner Loop "loop" | 1 | Sheets Delay |
 
 ---
 
@@ -31,7 +44,7 @@ One header row + **one data row**:
 | 123456789012345678 | 987654321098765432 |
 
 > Column names must be exactly `guild_id` and `role_id`.  
-> A single data row means the workflow reads exactly one item and runs `Get Pending Users` exactly once — no duplication.
+> A single data row means the workflow reads exactly one item — no duplication.
 
 ### Tab: `Users`
 
@@ -60,7 +73,7 @@ One header row + **one data row**:
 | Status   | Meaning                              |
 |----------|--------------------------------------|
 | `done`   | ✅ Role assigned successfully        |
-| `failed` | API error — see the `error` column   |
+| `failed` | ❌ API error — see the `error` column |
 
 To retry failed rows: filter the sheet for `status = failed`, clear those status cells, and re-run.
 
@@ -68,7 +81,9 @@ To retry failed rows: filter the sheet for `status = failed`, clear those status
 
 ## Throughput
 
-The native Discord node is rate-limited by Discord's API. For mass assignments:
-- ~5 requests/second is safe for most servers
-- 10,000 users ≈ ~30 minutes
-- 600,000 users — use the Schedule trigger (every 10 min) to run in batches over ~42 hours
+- **Discord:** 50 role assignments per outer batch — fast, no enforced delay
+- **Sheets writes:** 1 per second (inner loop + 1-second Wait) ≈ 60 rows/minute
+- **10,000 users ≈ ~2.5 hours** (background, via Schedule trigger every 10 min)
+- **600,000 users ≈ ~7 days** (use the Schedule trigger; workflow resumes from last blank row each run)
+
+If you still see Google Sheets quota errors, increase the Sheets Delay from 1 second to 2 seconds (~30 writes/minute).

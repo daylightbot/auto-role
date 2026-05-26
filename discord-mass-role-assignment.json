@@ -63,7 +63,7 @@
       "type": "n8n-nodes-base.splitInBatches",
       "typeVersion": 3,
       "position": [900, 400],
-      "notes": "'done' output (index 0) → leave UNCONNECTED.\n'loop' output (index 1) → Add Discord Role.\nLoop runs because Rate Limit Pause connects back to this node's INPUT."
+      "notes": "'done' output (index 0) → leave UNCONNECTED.\n'loop' output (index 1) → Add Discord Role.\nLoop runs because Sheets Delay connects back to this node's INPUT."
     },
     {
       "parameters": {
@@ -94,60 +94,72 @@
       "credentials": {
         "discordBotApi": { "id": "YOUR_DISCORD_CREDENTIAL_ID", "name": "Discord Bot account" }
       },
-      "notes": "Processes all 50 items in the current batch sequentially.\ncontinueOnFail means individual failures are captured as error items rather than crashing the batch."
+      "notes": "Processes all 50 items in the batch. continueOnFail captures errors without crashing."
     },
     {
       "parameters": {
-        "jsCode": "// ─────────────────────────────────────────────────────────────────\n// Build a Google Sheets batchUpdate payload.\n// One API call updates ALL rows in this batch — not one call per row.\n// This avoids the Google Sheets write quota (300 req/min) entirely.\n// ─────────────────────────────────────────────────────────────────\n\n// ── Adjust these if your Users sheet columns are in a different order ──\nconst STATUS_COL    = 'B'; // column containing 'status'\nconst TIMESTAMP_COL = 'C'; // column containing 'timestamp'\nconst ERROR_COL     = 'D'; // column containing 'error'\nconst SHEET_TAB     = 'Users';\nconst SPREADSHEET_ID = 'YOUR_SPREADSHEET_ID'; // ← replace this\n// ──────────────────────────────────────────────────────────────────\n\nconst discordResults = $input.all();\nconst loopItems      = $('🔁 Loop (50 users)').all(); // original items for this batch\nconst timestamp      = new Date().toISOString();\n\nconst data = discordResults.map((result, i) => {\n  const original = loopItems[i]?.json ?? {};\n  const rowNum   = original.row_number;\n  const hasError = !!result.json.error;\n\n  return {\n    range:  `${SHEET_TAB}!${STATUS_COL}${rowNum}:${ERROR_COL}${rowNum}`,\n    values: [[\n      hasError ? 'failed' : 'done',\n      timestamp,\n      hasError ? String(result.json.error).substring(0, 200) : ''\n    ]]\n  };\n});\n\nreturn [{\n  json: {\n    spreadsheetId: SPREADSHEET_ID,\n    body: JSON.stringify({ valueInputOption: 'RAW', data })\n  }\n}];\n",
-        "mode": "runOnceForAllItems"
+        "batchSize": 1,
+        "options": {}
       },
       "id": "a1b2c3d4-0001-0001-0001-000000000007",
-      "name": "📦 Build Batch Update",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
+      "name": "🔂 One Sheets Write at a Time",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
       "position": [1340, 400],
-      "notes": "Pairs each Discord result with the original loop item by index (order is preserved).\nOutputs a single batchUpdate payload covering all rows in the batch.\nEdit SPREADSHEET_ID, and the column letters if your sheet layout differs."
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "=https://sheets.googleapis.com/v4/spreadsheets/{{ $json.spreadsheetId }}/values:batchUpdate",
-        "authentication": "predefinedCredentialType",
-        "nodeCredentialType": "googleSheetsOAuth2Api",
-        "sendBody": true,
-        "contentType": "raw",
-        "rawContentType": "application/json",
-        "body": "={{ $json.body }}"
-      },
-      "id": "a1b2c3d4-0001-0001-0001-000000000008",
-      "name": "📝 Batch Update Sheets",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [1560, 400],
-      "continueOnFail": true,
-      "credentials": {
-        "googleSheetsOAuth2Api": { "id": "YOUR_GOOGLE_CREDENTIAL_ID", "name": "Google Sheets account" }
-      },
-      "notes": "Calls the Google Sheets batchUpdate API — updates all rows in the batch in ONE request.\nUses the same Google Sheets OAuth2 credential as the other Sheets nodes.\ncontinueOnFail: if Sheets is temporarily unavailable the batch rows stay blank and are retried on the next run."
+      "notes": "Feeds the 50 Discord results into the Sheets update one row at a time.\n'loop' output (index 1) → Sheets Delay → Update Row Status → back to THIS node's input.\n'done' output (index 0) → back to the outer Loop node's input."
     },
     {
       "parameters": {
         "resume": "timeInterval",
-        "amount": 3,
+        "amount": 1,
         "unit": "seconds"
       },
-      "id": "a1b2c3d4-0001-0001-0001-000000000009",
-      "name": "⏳ Pause Between Batches",
+      "id": "a1b2c3d4-0001-0001-0001-000000000008",
+      "name": "⏳ Sheets Delay (1 sec)",
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1.1,
-      "position": [1780, 400],
-      "webhookId": "pause-between-batches",
-      "notes": "3 seconds between batches of 50 = ~1000 users/minute.\nIncrease if you see Discord rate limit errors; the Sheets quota is no longer a concern."
+      "position": [1560, 260],
+      "webhookId": "sheets-delay",
+      "notes": "1 second between each Sheets write = max 60 writes/minute, well under quota.\nIncrease to 2s if you still see quota errors."
     },
     {
       "parameters": {
-        "content": "## Discord Mass Role Assignment\n\n### Flow\n```\n[Trigger]\n  → Read Config           (1 row → guild_id, role_id)\n  → Get Pending Users     (blank status rows only)\n  → Loop  'loop' output  (50 users per batch)\n  → Add Discord Role      (processes all 50 sequentially)\n  → Build Batch Update    (Code — 1 Sheets payload for all 50)\n  → Batch Update Sheets   (HTTP → 1 API call for all 50 rows)\n  → Pause Between Batches (3 sec)\n  → back to Loop\n```\n**Loop 'done' output → leave UNCONNECTED.**\n\n---\n\n### Why batch updates?\nGoogle Sheets allows ~300 write API calls per minute.\nUpdating 1 row per user = 300 calls/min limit hit immediately.\nUpdating 50 rows per API call = only 1 call per batch → quota is irrelevant.\n\n---\n\n### Setup checklist\n- [ ] Replace `YOUR_SPREADSHEET_ID` in:\n  - Read Config node\n  - Get Pending Users node\n  - Build Batch Update Code node (SPREADSHEET_ID constant)\n  - Batch Update Sheets URL\n- [ ] Set Google Sheets OAuth2 credential on Read Config, Get Pending Users, Batch Update Sheets\n- [ ] Set Discord Bot credential on Add Discord Role\n- [ ] Confirm Users sheet columns: B=status, C=timestamp, D=error\n  (edit column constants in Build Batch Update if different)\n\n---\n\n### Google Sheets layout\n**Config tab** — one data row:\n| guild_id | role_id |\n|----------|---------|\n| 123...   | 987...  |\n\n**Users tab:**\n| user_id | status | timestamp | error |\n|---------|--------|-----------|-------|\n|         |        |           |       |\n\n---\n\n### Throughput\n50 users per batch · 3 sec pause · ~1,000 users/min\n10k users ≈ 10 min · 600k users ≈ 10 hrs across scheduled runs",
-        "height": 740,
+        "operation": "update",
+        "documentId": { "__rl": true, "value": "YOUR_SPREADSHEET_ID", "mode": "id" },
+        "sheetName":  { "__rl": true, "value": "Users", "mode": "name" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "row_number": "={{ $('🔁 Loop (50 users)').first().json.row_number }}",
+            "status":     "={{ $json.error ? 'failed' : 'done' }}",
+            "timestamp":  "={{ $now.toISO() }}",
+            "error":      "={{ $json.error ? $json.error.toString().substring(0, 200) : '' }}"
+          },
+          "matchingColumns": ["row_number"],
+          "schema": [
+            { "id": "row_number", "displayName": "row_number", "required": false, "defaultMatch": true,  "display": true, "type": "string", "canBeUsedToMatch": true  },
+            { "id": "status",     "displayName": "status",     "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false },
+            { "id": "timestamp",  "displayName": "timestamp",  "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false },
+            { "id": "error",      "displayName": "error",      "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0001-0001-0001-000000000009",
+      "name": "✅ Update Row Status",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.4,
+      "position": [1780, 260],
+      "continueOnFail": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": { "id": "YOUR_GOOGLE_CREDENTIAL_ID", "name": "Google Sheets account" }
+      },
+      "notes": "Updates one row at a time, paced by the 1-second Wait above.\ncontinueOnFail: a transient quota error leaves the row blank for retry rather than crashing."
+    },
+    {
+      "parameters": {
+        "content": "## Discord Mass Role Assignment\n\n### Flow\n```\n[Trigger]\n  → Read Config\n  → Get Pending Users\n  → Outer Loop (50 users per batch)\n      → Add Discord Role   (all 50, fast)\n      → Inner Loop (1 at a time for Sheets)\n          → Sheets Delay   (1 sec throttle)\n          → Update Row Status\n          → back to Inner Loop\n      → back to Outer Loop\n```\n\n**Why two loops?**\nDiscord can handle 50 calls in a batch quickly.\nGoogle Sheets write quota (~60/min) means we must write one row\nat a time with a 1-second gap. The inner loop paces only the\nSheets writes — Discord runs at full speed.\n\n**Loop outputs:**\n- Outer loop 'done' (index 0) → UNCONNECTED\n- Outer loop 'loop' (index 1) → Add Discord Role\n- Inner loop 'done' (index 0) → back to Outer Loop INPUT\n- Inner loop 'loop' (index 1) → Sheets Delay\n\n---\n\n### Google Sheets layout\n**Config tab — one data row:**\n| guild_id | role_id |\n|----------|---------|\n| 123...   | 987...  |\n\n**Users tab:**\n| user_id | status | timestamp | error |\n\n---\n\n### Setup checklist\n- [ ] Replace `YOUR_SPREADSHEET_ID` on Read Config,\n      Get Pending Users, Update Row Status\n- [ ] Set Google Sheets credential on those nodes\n- [ ] Set Discord Bot credential on Add Discord Role\n- [ ] Bot has MANAGE_ROLES above target role\n\n---\n\n### Throughput\n50 Discord calls per outer batch · 1 Sheets write/sec\n~60 rows/min · 10k ≈ 2.5 hrs · 600k ≈ 7 days (background)",
+        "height": 720,
         "width": 520,
         "color": 5
       },
@@ -178,16 +190,19 @@
       ]
     },
     "🎭 Add Discord Role": {
-      "main": [[{ "node": "📦 Build Batch Update", "type": "main", "index": 0 }]]
+      "main": [[{ "node": "🔂 One Sheets Write at a Time", "type": "main", "index": 0 }]]
     },
-    "📦 Build Batch Update": {
-      "main": [[{ "node": "📝 Batch Update Sheets", "type": "main", "index": 0 }]]
+    "🔂 One Sheets Write at a Time": {
+      "main": [
+        [{ "node": "🔁 Loop (50 users)", "type": "main", "index": 0 }],
+        [{ "node": "⏳ Sheets Delay (1 sec)", "type": "main", "index": 0 }]
+      ]
     },
-    "📝 Batch Update Sheets": {
-      "main": [[{ "node": "⏳ Pause Between Batches", "type": "main", "index": 0 }]]
+    "⏳ Sheets Delay (1 sec)": {
+      "main": [[{ "node": "✅ Update Row Status", "type": "main", "index": 0 }]]
     },
-    "⏳ Pause Between Batches": {
-      "main": [[{ "node": "🔁 Loop (50 users)", "type": "main", "index": 0 }]]
+    "✅ Update Row Status": {
+      "main": [[{ "node": "🔂 One Sheets Write at a Time", "type": "main", "index": 0 }]]
     }
   },
   "active": false,
