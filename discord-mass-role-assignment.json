@@ -51,33 +51,20 @@
           "id": "YOUR_GOOGLE_CREDENTIAL_ID",
           "name": "Google Sheets account"
         }
-      }
+      },
+      "notes": "Returns 2 items (one per config row). The Code node below collapses them into one."
     },
     {
       "parameters": {
-        "assignments": {
-          "assignments": [
-            {
-              "id": "assign-guild-id",
-              "name": "guildId",
-              "value": "={{ $('📋 Read Config Sheet').all().find(i => i.json.setting === 'guild_id')?.json.value ?? '' }}",
-              "type": "string"
-            },
-            {
-              "id": "assign-role-id",
-              "name": "roleId",
-              "value": "={{ $('📋 Read Config Sheet').all().find(i => i.json.setting === 'role_id')?.json.value ?? '' }}",
-              "type": "string"
-            }
-          ]
-        },
-        "options": {}
+        "jsCode": "// Runs ONCE for all input items, returns exactly ONE item.\n// Fixes the double-execution bug: a Set node would emit one item\n// per input row (2 rows = 2 items), causing Get Pending Users to\n// run twice and return 20,000 rows instead of 10,000.\n\nconst items   = $input.all();\nconst guildId = items.find(i => i.json.setting === 'guild_id')?.json.value ?? '';\nconst roleId  = items.find(i => i.json.setting === 'role_id')?.json.value  ?? '';\n\nif (!guildId) throw new Error('guild_id row not found in Config sheet');\nif (!roleId)  throw new Error('role_id row not found in Config sheet');\n\nreturn [{ json: { guildId, roleId } }];\n",
+        "mode": "runOnceForAllItems"
       },
       "id": "a1b2c3d4-0001-0001-0001-000000000004",
       "name": "⚙️ Extract Config",
-      "type": "n8n-nodes-base.set",
-      "typeVersion": 3.4,
-      "position": [680, 400]
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 400],
+      "notes": "runOnceForAllItems mode — always outputs exactly 1 item regardless of how many config rows exist."
     },
     {
       "parameters": {
@@ -114,7 +101,8 @@
           "id": "YOUR_GOOGLE_CREDENTIAL_ID",
           "name": "Google Sheets account"
         }
-      }
+      },
+      "notes": "Now receives exactly 1 item from Extract Config, so this runs once and returns the correct number of pending users. returnRowNumbers adds row_number to each item."
     },
     {
       "parameters": {
@@ -126,87 +114,19 @@
       "type": "n8n-nodes-base.splitInBatches",
       "typeVersion": 3,
       "position": [1120, 400],
-      "notes": "Output 0 → current user. Split: one copy goes to the HTTP Request, the other goes directly to the Merge node's second input as a pass-through.\nOutput 1 → all batches done. Leave this UNCONNECTED — the workflow ends here naturally.\n\nThe loop runs because Update Row Status connects back to THIS node's input."
+      "notes": "'done' output (index 0) → leave UNCONNECTED. Workflow ends naturally here.\n'loop' output (index 1) → Assign Role node.\n\nThe loop runs because Update Row Status connects back to THIS node's input."
     },
     {
       "parameters": {
-        "method": "PUT",
-        "url": "=https://discord.com/api/v10/guilds/{{ $('⚙️ Extract Config').first().json.guildId }}/members/{{ $json.user_id }}/roles/{{ $('⚙️ Extract Config').first().json.roleId }}",
-        "authentication": "predefinedCredentialType",
-        "nodeCredentialType": "discordBotApi",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            },
-            {
-              "name": "X-Audit-Log-Reason",
-              "value": "Mass role assignment"
-            }
-          ]
-        },
-        "options": {
-          "response": {
-            "response": {
-              "fullResponse": true,
-              "responseFormat": "text",
-              "neverError": true
-            }
-          }
-        }
-      },
-      "id": "a1b2c3d4-0001-0001-0001-000000000007",
-      "name": "🌐 Call Discord API",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [1340, 240],
-      "continueOnFail": true,
-      "credentials": {
-        "discordBotApi": {
-          "id": "YOUR_DISCORD_CREDENTIAL_ID",
-          "name": "Discord Bot account"
-        }
-      },
-      "notes": "Receives the current user item from the Loop. neverError:true means 204, 404, 429, 403 all arrive as normal output with a statusCode field. continueOnFail covers network failures. $json is then the HTTP response — user_id and row_number are recovered by the Merge node."
-    },
-    {
-      "parameters": {
-        "mode": "mergeByIndex"
-      },
-      "id": "a1b2c3d4-0001-0001-0001-000000000008",
-      "name": "🔗 Merge Response + User Data",
-      "type": "n8n-nodes-base.merge",
-      "typeVersion": 2.1,
-      "position": [1560, 400],
-      "notes": "typeVersion 2.1 / mergeByIndex = position-based merge. No 'fields to match' required.\n\nInput 0 (top): HTTP response — statusCode, body, headers.\nInput 1 (bottom): original user item direct from Loop — user_id, row_number.\n\nOutput: one item with all fields from both, so the next node has everything."
-    },
-    {
-      "parameters": {
-        "jsCode": "// ─────────────────────────────────────────────────────────────\n// All data is now in $json thanks to the Merge node:\n//   statusCode, body  ← from the Discord API response\n//   user_id, row_number ← from the original loop item\n// No pairedItem lookup needed.\n// ─────────────────────────────────────────────────────────────\n\nconst statusCode   = $json.statusCode;\nconst responseBody = String($json.body ?? '');\nconst userId       = $json.user_id;\nconst rowNumber    = $json.row_number;\nconst timestamp    = new Date().toISOString();\n\nlet status, errorMsg;\n\nif (statusCode === 204 || statusCode === 200) {\n  status   = 'done';\n  errorMsg = '';\n\n} else if (statusCode === 404) {\n  status   = 'not_in_server';\n  errorMsg = 'User not found in server — they may have left (404)';\n\n} else if (statusCode === 429) {\n  status   = 'rate_limited';\n  errorMsg = `Discord rate limited the request (429): ${responseBody.substring(0, 100)}`;\n\n} else if (statusCode === 403) {\n  status   = 'failed';\n  errorMsg = 'Bot lacks MANAGE_ROLES or target role is above bot in hierarchy (403)';\n\n} else if (statusCode == null) {\n  status   = 'failed';\n  errorMsg = `Network error: ${String($json.error ?? 'unknown')}`;\n\n} else {\n  status   = 'failed';\n  errorMsg = `HTTP ${statusCode}: ${responseBody.substring(0, 200)}`;\n}\n\nreturn [{\n  json: { user_id: userId, row_number: rowNumber, status, timestamp, error: errorMsg }\n}];\n",
+        "jsCode": "// ─────────────────────────────────────────────────────────────────\n// Assign a Discord role using n8n's built-in credential helper.\n//\n// $json here is the current loop item — it has user_id and row_number\n// directly, no Merge node or pairedItem lookup needed.\n//\n// $helpers.httpRequestWithAuthentication uses the Discord Bot\n// credential stored in n8n — the token never touches the sheet.\n// ─────────────────────────────────────────────────────────────────\n\nconst userId    = $json.user_id;\nconst rowNumber = $json.row_number;\n\nconst config  = $('⚙️ Extract Config').first().json;\nconst guildId = config.guildId;\nconst roleId  = config.roleId;\n\nconst url       = `https://discord.com/api/v10/guilds/${guildId}/members/${userId}/roles/${roleId}`;\nconst timestamp = new Date().toISOString();\n\nlet status = 'done', errorMsg = '';\n\ntry {\n  const response = await $helpers.httpRequestWithAuthentication(\n    'discordBotApi',\n    {\n      method:                 'PUT',\n      url,\n      headers: {\n        'Content-Type':       'application/json',\n        'X-Audit-Log-Reason': 'Mass role assignment'\n      },\n      returnFullResponse:     true,\n      ignoreHttpStatusErrors: true\n    }\n  );\n\n  const code = response.statusCode;\n  const body = typeof response.body === 'string'\n    ? response.body\n    : JSON.stringify(response.body ?? '');\n\n  if (code === 204 || code === 200) {\n    status   = 'done';\n    errorMsg = '';\n\n  } else if (code === 404) {\n    status   = 'not_in_server';\n    errorMsg = 'User not found in server — they may have left (404)';\n\n  } else if (code === 429) {\n    status   = 'rate_limited';\n    errorMsg = `Discord rate limited the request (429): ${body.substring(0, 100)}`;\n\n  } else if (code === 403) {\n    status   = 'failed';\n    errorMsg = 'Bot lacks MANAGE_ROLES or target role is above bot in hierarchy (403)';\n\n  } else {\n    status   = 'failed';\n    errorMsg = `HTTP ${code}: ${body.substring(0, 200)}`;\n  }\n\n} catch (err) {\n  status   = 'failed';\n  errorMsg = `Network error: ${err.message?.substring(0, 200) ?? 'unknown'}`;\n}\n\n// Rate limiting: ~4 requests/second, safely under Discord's limit.\nawait new Promise(r => setTimeout(r, 250));\n\nreturn [{\n  json: { user_id: userId, row_number: rowNumber, status, timestamp, error: errorMsg }\n}];\n",
         "mode": "runOnceForEachItem"
       },
-      "id": "a1b2c3d4-0001-0001-0001-000000000009",
-      "name": "📝 Process Response",
+      "id": "a1b2c3d4-0001-0001-0001-000000000007",
+      "name": "🎭 Assign Role",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1780, 400],
-      "notes": "Reads directly from $json (populated by the Merge node above). No pairedItem chain — that approach breaks across SplitInBatches boundaries."
-    },
-    {
-      "parameters": {
-        "resume": "timeInterval",
-        "amount": 250,
-        "unit": "milliseconds"
-      },
-      "id": "a1b2c3d4-0001-0001-0001-000000000010",
-      "name": "⏱ Rate Limit Delay (250 ms)",
-      "type": "n8n-nodes-base.wait",
-      "typeVersion": 1.1,
-      "position": [2000, 400],
-      "webhookId": "rate-limit-delay-webhook",
-      "notes": "~4 requests/second. Bump to 500ms if rate_limited rows appear."
+      "position": [1340, 400],
+      "notes": "Does everything in one node: reads user_id + row_number from $json, calls Discord via $helpers.httpRequestWithAuthentication (n8n credential, no token in sheet), handles all status codes, waits 250ms, returns a clean item for the Update node."
     },
     {
       "parameters": {
@@ -271,27 +191,27 @@
         },
         "options": {}
       },
-      "id": "a1b2c3d4-0001-0001-0001-000000000011",
+      "id": "a1b2c3d4-0001-0001-0001-000000000008",
       "name": "✅ Update Row Status",
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4.4,
-      "position": [2220, 400],
+      "position": [1560, 400],
       "credentials": {
         "googleSheetsOAuth2Api": {
           "id": "YOUR_GOOGLE_CREDENTIAL_ID",
           "name": "Google Sheets account"
         }
       },
-      "notes": "Updates the exact sheet row by row_number. After this, the connection back to the Loop node triggers the next iteration."
+      "notes": "Updates the exact sheet row by row_number. After writing, the connection back to the Loop node triggers the next iteration."
     },
     {
       "parameters": {
-        "content": "## 🚀 Discord Mass Role Assignment\n\n### How the loop works\n\n```\n                   ┌─► 🌐 Call Discord API ──────────┐\n🔁 Loop (output 0)─┤                                  ▼\n                   └────────────────────────► 🔗 Merge (mergeByIndex)\n                                                      │\n                                              📝 Process Response\n                                                      │\n                                              ⏱ Rate Limit Delay\n                                                      │\n                                              ✅ Update Row Status\n                                                      │\n                                              back to 🔁 Loop input\n```\n\n**Loop output 1 (\"done\") → leave UNCONNECTED.**\nThe workflow ends naturally when all batches are exhausted.\nThe loop runs because `Update Row Status` connects to the Loop INPUT.\n\n### Google Sheets layout\n\n**Tab: Config**\n| setting  | value              |\n|----------|--------------------|\n| guild_id | 123456789012345678 |\n| role_id  | 987654321098765432 |\n\n✅ No bot token in the sheet — lives in n8n Credentials.\n\n**Tab: Users**\n| user_id            | status | timestamp | error |\n|--------------------|--------|-----------|-------|\n| 111222333444555666 |        |           |       |\n\nLeave status **blank** for pending rows.\n\n### Before first run\n1. Replace `YOUR_SPREADSHEET_ID` on all three Google Sheets nodes\n2. Connect **Google Sheets OAuth2** credential on those nodes\n3. Connect **Discord Bot** credential on the HTTP Request node\n4. Bot must have `MANAGE_ROLES` and sit above the target role in the hierarchy\n\n### Status values\n| Status          | Meaning                               |\n|-----------------|---------------------------------------|\n| `done`          | ✅ Role assigned                      |\n| `not_in_server` | User left (404) — skipped next run    |\n| `rate_limited`  | Throttled (429) — retried next run    |\n| `failed`        | Other error — see error column        |\n\n### Throughput\n~4/sec · 10k ≈ 42 min · 600k ≈ 42 hrs across scheduled runs",
+        "content": "## 🚀 Discord Mass Role Assignment\n\n### Flow\n```\n[Trigger]\n  → 📋 Read Config Sheet       (returns 2 rows)\n  → ⚙️ Extract Config          (Code, collapses to 1 item)\n  → 👥 Get Pending Users       (runs once — correct row count)\n  → 🔁 Loop  'loop' output\n  → 🎭 Assign Role             (Code — Discord API + error handling)\n  → ✅ Update Row Status\n  → back to 🔁 Loop input\n```\n\n**Loop outputs:**\n- `loop` (index 1) → Assign Role\n- `done` (index 0) → **leave unconnected** — workflow ends here\n\n### Google Sheets layout\n\n**Tab: Config**\n| setting  | value              |\n|----------|--------------------|\n| guild_id | 123456789012345678 |\n| role_id  | 987654321098765432 |\n\n✅ No bot token in the sheet — stored in n8n Credentials.\n\n**Tab: Users**\n| user_id            | status | timestamp | error |\n|--------------------|--------|-----------|-------|\n| 111222333444555666 |        |           |       |\n\nLeave status **blank** for pending rows. Re-run to retry `rate_limited` rows.\n\n### Before first run\n1. Replace `YOUR_SPREADSHEET_ID` on all three Google Sheets nodes\n2. Connect **Google Sheets OAuth2** credential on those nodes\n3. In the **Assign Role** Code node, the credential type is `discordBotApi` — make sure a Discord Bot credential with that type exists in n8n\n4. Bot must have `MANAGE_ROLES` and sit above the target role in the hierarchy\n\n### Status values\n| Status          | Meaning                               |\n|-----------------|---------------------------------------|\n| `done`          | ✅ Role assigned                      |\n| `not_in_server` | User left (404) — skipped next run    |\n| `rate_limited`  | Throttled (429) — retried next run    |\n| `failed`        | Other error — see error column        |\n\n### Throughput\n~4/sec · 10k ≈ 42 min · 600k ≈ 42 hrs across scheduled runs",
         "height": 760,
         "width": 540,
         "color": 5
       },
-      "id": "a1b2c3d4-0001-0001-0001-000000000012",
+      "id": "a1b2c3d4-0001-0001-0001-000000000009",
       "name": "📖 Setup Notes",
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
@@ -327,28 +247,10 @@
     "🔁 Loop (1 user at a time)": {
       "main": [
         [],
-        [
-          {"node": "🌐 Call Discord API",          "type": "main", "index": 0},
-          {"node": "🔗 Merge Response + User Data", "type": "main", "index": 1}
-        ]
+        [{"node": "🎭 Assign Role", "type": "main", "index": 0}]
       ]
     },
-    "🌐 Call Discord API": {
-      "main": [
-        [{"node": "🔗 Merge Response + User Data", "type": "main", "index": 0}]
-      ]
-    },
-    "🔗 Merge Response + User Data": {
-      "main": [
-        [{"node": "📝 Process Response", "type": "main", "index": 0}]
-      ]
-    },
-    "📝 Process Response": {
-      "main": [
-        [{"node": "⏱ Rate Limit Delay (250 ms)", "type": "main", "index": 0}]
-      ]
-    },
-    "⏱ Rate Limit Delay (250 ms)": {
+    "🎭 Assign Role": {
       "main": [
         [{"node": "✅ Update Row Status", "type": "main", "index": 0}]
       ]
