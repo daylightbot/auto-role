@@ -126,6 +126,12 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [1340, 400],
+      "credentials": {
+        "discordBotApi": {
+          "id": "YOUR_DISCORD_CREDENTIAL_ID",
+          "name": "Discord Bot account"
+        }
+      },
       "notes": "Does everything in one node: reads user_id + row_number from $json, calls Discord via $helpers.httpRequestWithAuthentication (n8n credential, no token in sheet), handles all status codes, waits 250ms, returns a clean item for the Update node."
     },
     {
