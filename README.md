@@ -53,10 +53,9 @@ You need one spreadsheet with **two tabs**:
 |-----------|------------------------|
 | guild_id  | `123456789012345678`   |
 | role_id   | `987654321098765432`   |
-| bot_token | `Bot MTIzNDU2...`      |
 
-> ⚠️ Include the `Bot ` prefix in the token value.  
-> The Role ID and Guild ID are 18-digit numbers found in Discord (enable Developer Mode → right-click the server/role → Copy ID).
+> The Role ID and Guild ID are 18-digit numbers found in Discord (enable Developer Mode → right-click the server/role → Copy ID).  
+> **The bot token is not stored here** — it lives securely in n8n Credentials (see step 4).
 
 #### Tab: `Users`
 
@@ -83,11 +82,13 @@ The spreadsheet ID is in the Google Sheets URL:
 https://docs.google.com/spreadsheets/d/THIS_IS_YOUR_ID/edit
 ```
 
-### 4. Connect your Google Sheets credential
+### 4. Connect your credentials
 
-In n8n, go to **Credentials → New → Google Sheets OAuth2**, follow the auth flow, then select it in all three Google Sheets nodes.
+**Google Sheets** — in n8n, go to **Credentials → New → Google Sheets OAuth2**, follow the auth flow, then select it in all three Google Sheets nodes.
 
-### 5. Set your Discord bot up
+**Discord Bot** — open the `🌐 Call Discord API` node, click the Credential field, and select your existing Discord Bot credential. The token is never written to the sheet.
+
+### 5. Set your Discord bot permissions
 
 Your bot needs:
 - `MANAGE_ROLES` permission in the server
@@ -113,7 +114,7 @@ Your bot needs:
 
 ## Throughput & time estimates
 
-The workflow processes ~4 users/second (250 ms gap between successful calls, staying well under Discord's rate limits).
+The workflow processes ~4 users/second (250 ms Wait node gap between calls, staying well under Discord's rate limits).
 
 | Users    | Time per run (1,000-row batch) | Total time       |
 |----------|-------------------------------|------------------|
