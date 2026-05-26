@@ -1,0 +1,345 @@
+{
+  "name": "Discord Mass Role Assignment",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "a1b2c3d4-0001-0001-0001-000000000001",
+      "name": "▶ Run Manually",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [200, 500],
+      "notes": "Use this to kick off a run by hand (testing, ad-hoc batches, etc.)."
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 10
+            }
+          ]
+        }
+      },
+      "id": "a1b2c3d4-0001-0001-0001-000000000002",
+      "name": "⏰ Schedule (every 10 min)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [200, 300],
+      "notes": "Runs automatically every 10 minutes. Each execution picks up the next 1,000 pending users. Disable the Manual Trigger when going live."
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_SPREADSHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Config",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0001-0001-0001-000000000003",
+      "name": "📋 Read Config Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.4,
+      "position": [440, 400],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GOOGLE_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      },
+      "notes": "Reads the Config sheet. Expected columns: 'setting' and 'value'. Rows: guild_id, role_id, bot_token."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "assign-guild-id",
+              "name": "guildId",
+              "value": "={{ $('📋 Read Config Sheet').all().find(i => i.json.setting === 'guild_id')?.json.value ?? '' }}",
+              "type": "string"
+            },
+            {
+              "id": "assign-role-id",
+              "name": "roleId",
+              "value": "={{ $('📋 Read Config Sheet').all().find(i => i.json.setting === 'role_id')?.json.value ?? '' }}",
+              "type": "string"
+            },
+            {
+              "id": "assign-bot-token",
+              "name": "botToken",
+              "value": "={{ $('📋 Read Config Sheet').all().find(i => i.json.setting === 'bot_token')?.json.value ?? '' }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0001-0001-0001-000000000004",
+      "name": "⚙️ Extract Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [660, 400],
+      "notes": "Pulls guild_id, role_id, and bot_token out of the Config sheet rows into a single clean item."
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_SPREADSHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Users",
+          "mode": "name"
+        },
+        "filtersUI": {
+          "values": [
+            {
+              "lookupColumn": "status",
+              "lookupValue": ""
+            }
+          ]
+        },
+        "options": {
+          "returnRowNumbers": true
+        }
+      },
+      "id": "a1b2c3d4-0001-0001-0001-000000000005",
+      "name": "👥 Get Pending Users",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.4,
+      "position": [880, 400],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GOOGLE_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      },
+      "notes": "Reads only rows where 'status' is blank (not yet processed). Returns row numbers so we can update the exact row. If 0 rows are returned, the workflow ends naturally here — no more work to do."
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "a1b2c3d4-0001-0001-0001-000000000006",
+      "name": "🔁 Loop (1 user at a time)",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [1100, 400],
+      "notes": "Processes one user per iteration so each row in the sheet is updated immediately after its Discord call. Output 0 = current user, Output 1 = all users done (workflow ends)."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────\n// ASSIGN DISCORD ROLE  — runs once per user\n// ─────────────────────────────────────────────────────────────\nconst userId    = $json.user_id;    // Discord User Snowflake ID\nconst rowNumber = $json.row_number; // Sheet row (for the update step)\n\n// Pull config from the earlier Set node (available throughout the execution)\nconst config   = $('⚙️ Extract Config').first().json;\nconst guildId  = config.guildId;\nconst roleId   = config.roleId;\nconst botToken = config.botToken;\n\nif (!guildId || !roleId || !botToken) {\n  throw new Error('Config is missing guildId, roleId, or botToken. Check the Config sheet.');\n}\n\nconst url = `https://discord.com/api/v10/guilds/${guildId}/members/${userId}/roles/${roleId}`;\nconst timestamp = new Date().toISOString();\n\nlet status   = 'done';\nlet errorMsg = '';\n\ntry {\n  const res = await fetch(url, {\n    method: 'PUT',\n    headers: {\n      'Authorization':      `Bot ${botToken}`,\n      'Content-Type':       'application/json',\n      'X-Audit-Log-Reason': 'Mass role assignment'\n    }\n  });\n\n  if (res.status === 204 || res.status === 200) {\n    // 204 = success, role assigned\n    status = 'done';\n\n  } else if (res.status === 429) {\n    // Rate limited — back off and mark for retry\n    const retryAfter = parseFloat(res.headers.get('Retry-After') ?? '1');\n    await new Promise(r => setTimeout(r, retryAfter * 1000 + 500));\n    status   = 'rate_limited';\n    errorMsg = `Rate limited. Retry-After: ${retryAfter}s`;\n\n  } else if (res.status === 404) {\n    // User is no longer in the server — mark permanently so we skip next time\n    status   = 'not_in_server';\n    errorMsg = 'User not found in server (404) — they may have left.';\n\n  } else if (res.status === 403) {\n    status   = 'failed';\n    errorMsg = 'Bot lacks MANAGE_ROLES permission or target role is higher than bot role (403).';\n\n  } else {\n    let body = '';\n    try { body = await res.text(); } catch (_) {}\n    status   = 'failed';\n    errorMsg = `HTTP ${res.status}: ${body.substring(0, 200)}`;\n  }\n\n} catch (err) {\n  status   = 'failed';\n  errorMsg = `Network error: ${err.message}`;\n}\n\n// ─── Rate limiting: ~4 req/sec (stay comfortably under Discord limits) ───\n// Only delay on successful assignments; errors already delayed above.\nif (status === 'done') {\n  await new Promise(r => setTimeout(r, 250));\n}\n\nreturn [{\n  json: {\n    user_id:    userId,\n    row_number: rowNumber,\n    status,\n    timestamp,\n    error:      errorMsg\n  }\n}];\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "a1b2c3d4-0001-0001-0001-000000000007",
+      "name": "🎭 Assign Discord Role",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, 400],
+      "notes": "Makes the Discord PUT /roles API call. Handles 204 success, 404 not-in-server, 429 rate limit, and generic errors. Always returns user_id + row_number + status so the next node can update the sheet regardless of outcome."
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_SPREADSHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Users",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "row_number": "={{ $json.row_number }}",
+            "status":     "={{ $json.status }}",
+            "timestamp":  "={{ $json.timestamp }}",
+            "error":      "={{ $json.error }}"
+          },
+          "matchingColumns": ["row_number"],
+          "schema": [
+            {
+              "id":             "row_number",
+              "displayName":    "row_number",
+              "required":       false,
+              "defaultMatch":   true,
+              "display":        true,
+              "type":           "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id":             "status",
+              "displayName":    "status",
+              "required":       false,
+              "defaultMatch":   false,
+              "display":        true,
+              "type":           "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id":             "timestamp",
+              "displayName":    "timestamp",
+              "required":       false,
+              "defaultMatch":   false,
+              "display":        true,
+              "type":           "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id":             "error",
+              "displayName":    "error",
+              "required":       false,
+              "defaultMatch":   false,
+              "display":        true,
+              "type":           "string",
+              "canBeUsedToMatch": false
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0001-0001-0001-000000000008",
+      "name": "✅ Update Row Status",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.4,
+      "position": [1540, 400],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GOOGLE_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      },
+      "notes": "Updates the exact sheet row (by row_number) with: status (done/failed/not_in_server/rate_limited), timestamp, and any error message. If this workflow ever crashes, only rows still showing blank status will be retried next run."
+    },
+    {
+      "parameters": {
+        "content": "## 🚀 Discord Mass Role Assignment\n\n### What this workflow does\n1. **Reads config** (Guild ID, Role ID, Bot Token) from the *Config* sheet\n2. **Fetches all pending users** from the *Users* sheet (rows where `status` is blank)\n3. **Assigns the role** to each user via Discord's REST API\n4. **Stamps each row** with `done`, `failed`, `not_in_server`, or `rate_limited` + a timestamp\n5. **Loops** — on the next run, only rows still showing blank `status` are picked up, giving you automatic crash-resume\n\n### Google Sheets setup\n**Config sheet** (tab name: `Config`)\n| setting | value |\n|---------|-------|\n| guild_id | 123456789012345678 |\n| role_id | 987654321098765432 |\n| bot_token | Bot MTIz... |\n\n**Users sheet** (tab name: `Users`)\n| user_id | status | timestamp | error |\n|---------|--------|-----------|-------|\n| 123456789012345678 | | | |\n| 234567890123456789 | | | |\n\n> Leave `status` blank for pending rows. Rows already marked `done` are automatically skipped.\n\n### Before first run\n- Replace `YOUR_SPREADSHEET_ID` on the three Google Sheets nodes\n- Connect your Google Sheets credential\n- Set the `bot_token` cell in the Config sheet (include the `Bot ` prefix)\n- Make sure your bot has `MANAGE_ROLES` permission and sits **above** the target role in the server hierarchy\n\n### Throughput & timing\n- ~4 assignments/second (250 ms gap between successful calls)\n- 10,000 users ≈ 42 minutes per run\n- 600,000 users ≈ 600 × 10-min scheduled runs ≈ 4 days at full pace\n- To go faster: run multiple instances with disjoint user lists in separate sheets\n\n### Status values written to the sheet\n| Status | Meaning |\n|--------|---------|\n| `done` | Role assigned successfully ✅ |\n| `not_in_server` | User has left the server — skip forever |\n| `rate_limited` | Hit Discord rate limit — will retry next run |\n| `failed` | API error — see `error` column for details |",
+        "height": 740,
+        "width": 520,
+        "color": 5
+      },
+      "id": "a1b2c3d4-0001-0001-0001-000000000009",
+      "name": "📖 Setup Notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [200, -400]
+    }
+  ],
+  "connections": {
+    "▶ Run Manually": {
+      "main": [
+        [
+          {
+            "node": "📋 Read Config Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "⏰ Schedule (every 10 min)": {
+      "main": [
+        [
+          {
+            "node": "📋 Read Config Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📋 Read Config Sheet": {
+      "main": [
+        [
+          {
+            "node": "⚙️ Extract Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "⚙️ Extract Config": {
+      "main": [
+        [
+          {
+            "node": "👥 Get Pending Users",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "👥 Get Pending Users": {
+      "main": [
+        [
+          {
+            "node": "🔁 Loop (1 user at a time)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔁 Loop (1 user at a time)": {
+      "main": [
+        [
+          {
+            "node": "🎭 Assign Discord Role",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "🎭 Assign Discord Role": {
+      "main": [
+        [
+          {
+            "node": "✅ Update Row Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "✅ Update Row Status": {
+      "main": [
+        [
+          {
+            "node": "🔁 Loop (1 user at a time)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}
