@@ -326,11 +326,11 @@
     },
     "🔁 Loop (1 user at a time)": {
       "main": [
+        [],
         [
           {"node": "🌐 Call Discord API",          "type": "main", "index": 0},
           {"node": "🔗 Merge Response + User Data", "type": "main", "index": 1}
-        ],
-        []
+        ]
       ]
     },
     "🌐 Call Discord API": {
