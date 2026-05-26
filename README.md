@@ -1,150 +1,74 @@
 # Discord Mass Role Assignment — n8n Workflow
 
-Assigns a single Discord role to a large list of users, tracking progress in Google Sheets so any failure can be resumed exactly where it left off — no re-processing from the beginning.
+Assigns a single Discord role to a large list of users. Reads User IDs from Google Sheets, assigns the role via the native n8n Discord node, and stamps each row with `done` or `failed` so any interrupted run resumes exactly where it left off.
 
 ---
 
-## How it works
+## Workflow (7 nodes)
 
 ```
-[Manual / Schedule Trigger]
-        │
-        ▼
-[Read Config Sheet]  ← guild_id, role_id, bot_token
-        │
-        ▼
-[Extract Config]
-        │
-        ▼
-[Get Pending Users]  ← only rows where status = blank
-        │
-        ▼
-[Loop — 1 user at a time] ◄──────────────────────┐
-        │ (output 0: current user)                 │
-        ▼                                          │
-[Assign Discord Role]  ← PUT /guilds/.../roles/... │
-        │                                          │
-        ▼                                          │
-[Update Row Status]  → writes done/failed/etc      │
-        │                                          │
-        └──────────────────────────────────────────┘
-        (loops until all pending rows processed)
-
-[output 1: all done → workflow ends cleanly]
+[Trigger]
+  → Read Config        — reads guild_id and role_id from a single sheet row
+  → Get Pending Users  — fetches rows where status is blank
+  → Loop               — processes one user at a time
+  → Add Discord Role   — native Discord node, credential attached directly
+  → Update Row Status  — writes done/failed back to the sheet
+  → back to Loop
 ```
 
-**Resume logic:** Every run reads only rows with a blank `status` column. If the workflow crashes at row 47,832, the next run skips rows 1–47,831 (already `done`) and picks up at 47,832 automatically.
+The "done" output of the Loop node is **left unconnected** — the workflow ends naturally when all pending users are processed.
 
 ---
 
-## Setup
+## Google Sheets setup
 
-### 1. Import the workflow
+### Tab: `Config`
 
-In n8n: **Workflows → Import from file** → select `discord-mass-role-assignment.json`.
+One header row + **one data row**:
 
-### 2. Create your Google Spreadsheet
+| guild_id           | role_id            |
+|--------------------|--------------------|
+| 123456789012345678 | 987654321098765432 |
 
-You need one spreadsheet with **two tabs**:
+> Column names must be exactly `guild_id` and `role_id`.  
+> A single data row means the workflow reads exactly one item and runs `Get Pending Users` exactly once — no duplication.
 
-#### Tab: `Config`
-
-| setting   | value                  |
-|-----------|------------------------|
-| guild_id  | `123456789012345678`   |
-| role_id   | `987654321098765432`   |
-
-> The Role ID and Guild ID are 18-digit numbers found in Discord (enable Developer Mode → right-click the server/role → Copy ID).  
-> **The bot token is not stored here** — it lives securely in n8n Credentials (see step 4).
-
-#### Tab: `Users`
+### Tab: `Users`
 
 | user_id            | status | timestamp | error |
 |--------------------|--------|-----------|-------|
 | 111222333444555666 |        |           |       |
 | 222333444555666777 |        |           |       |
-| ...                |        |           |       |
 
-- `status` starts **blank** for every user. The workflow fills it in.
-- You can add as many rows as you need (tested to 600k+).
-- To retry a failed user, clear their `status` cell and re-run.
+- Leave `status` **blank** for pending rows.
+- Rows already marked `done` or `failed` are skipped automatically on re-runs.
+- To retry a failed row, clear its `status` cell.
 
-### 3. Configure the three Google Sheets nodes
+---
 
-In n8n, open each of these nodes and update the **Spreadsheet ID**:
+## Setup checklist
 
-- `📋 Read Config Sheet`
-- `👥 Get Pending Users`
-- `✅ Update Row Status`
-
-The spreadsheet ID is in the Google Sheets URL:
-```
-https://docs.google.com/spreadsheets/d/THIS_IS_YOUR_ID/edit
-```
-
-### 4. Connect your credentials
-
-**Google Sheets** — in n8n, go to **Credentials → New → Google Sheets OAuth2**, follow the auth flow, then select it in all three Google Sheets nodes.
-
-**Discord Bot** — open the `🌐 Call Discord API` node, click the Credential field, and select your existing Discord Bot credential. The token is never written to the sheet.
-
-### 5. Set your Discord bot permissions
-
-Your bot needs:
-- `MANAGE_ROLES` permission in the server
-- Its **highest role must be above the role you're assigning** in the server's role hierarchy
-
-### 6. Activate
-
-- For a **one-off run**: use the `▶ Run Manually` trigger
-- For **automated batches**: enable the `⏰ Schedule (every 10 min)` trigger (disable the manual one)
+1. Replace `YOUR_SPREADSHEET_ID` on **Read Config**, **Get Pending Users**, and **Update Row Status**
+2. Set your **Google Sheets OAuth2** credential on those same three nodes
+3. Set your **Discord Bot** credential on **Add Discord Role**
+4. Make sure the bot has `MANAGE_ROLES` permission and its highest role sits **above** the target role in the server hierarchy
 
 ---
 
 ## Status values
 
-| Status          | Meaning                                                    |
-|-----------------|------------------------------------------------------------|
-| `done`          | ✅ Role assigned successfully                              |
-| `not_in_server` | User has left the server. Row is skipped on future runs.  |
-| `rate_limited`  | Hit Discord's rate limit — will auto-retry next run       |
-| `failed`        | API error — check the `error` column for details          |
+| Status   | Meaning                              |
+|----------|--------------------------------------|
+| `done`   | ✅ Role assigned successfully        |
+| `failed` | API error — see the `error` column   |
+
+To retry failed rows: filter the sheet for `status = failed`, clear those status cells, and re-run.
 
 ---
 
-## Throughput & time estimates
+## Throughput
 
-The workflow processes ~4 users/second (250 ms Wait node gap between calls, staying well under Discord's rate limits).
-
-| Users    | Time per run (1,000-row batch) | Total time       |
-|----------|-------------------------------|------------------|
-| 10,000   | ~2.5 min                      | ~42 min          |
-| 100,000  | ~2.5 min/batch × 100 runs     | ~7 hours         |
-| 600,000  | ~2.5 min/batch × 600 runs     | ~42 hours        |
-
-> **Want faster?** Create two copies of the workflow with separate Users sheets (split your list in half). Run them simultaneously with different bot tokens. Two bots = 2× speed, etc.
-
----
-
-## Frequently asked questions
-
-**Can I change the Role ID mid-run?**  
-Yes — update the `role_id` cell in the Config sheet. The next run will pick up the new value. Already-assigned users are unaffected (their rows are `done`).
-
-**What if a user gets the wrong role?**  
-Discord role assignments via this workflow use `PUT` which only adds the role — it doesn't touch any other roles the user has.
-
-**What if my n8n execution times out?**  
-Each run picks up from the first blank-status row. Just re-trigger and it continues where it left off. If you hit n8n's execution timeout for a single run, lower the per-run batch by adding a row count limit to the `Get Pending Users` node (Options → Limit).
-
-**How do I handle the bot_token securely?**  
-For production, store the token in an n8n **Credential** (type: Header Auth) and reference it from the Code node via `$credentials.yourCredentialName.value` instead of reading it from the sheet.
-
----
-
-## Files in this repo
-
-| File | Description |
-|------|-------------|
-| `discord-mass-role-assignment.json` | The importable n8n workflow |
-| `README.md` | This document |
+The native Discord node is rate-limited by Discord's API. For mass assignments:
+- ~5 requests/second is safe for most servers
+- 10,000 users ≈ ~30 minutes
+- 600,000 users — use the Schedule trigger (every 10 min) to run in batches over ~42 hours
