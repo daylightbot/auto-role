@@ -126,10 +126,25 @@
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4.4,
       "position": [1340, 400],
+      "continueOnFail": true,
       "credentials": {
         "googleSheetsOAuth2Api": { "id": "YOUR_GOOGLE_CREDENTIAL_ID", "name": "Google Sheets account" }
       },
-      "notes": "row_number comes from the loop item (reliable with batchSize=1).\nstatus is 'done' if no error, 'failed' if the Discord node errored.\nAfter writing, the connection back to the Loop input triggers the next iteration."
+      "notes": "row_number comes from the loop item (reliable with batchSize=1).\nstatus is 'done' if no error, 'failed' if the Discord node errored.\ncontinueOnFail means a transient Sheets quota error won't kill the loop —\nthe row stays blank and gets retried on the next run."
+    },
+    {
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": 500,
+        "unit": "milliseconds"
+      },
+      "id": "a1b2c3d4-0001-0001-0001-000000000009",
+      "name": "⏳ Rate Limit Pause",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [1560, 400],
+      "webhookId": "rate-limit-pause",
+      "notes": "500 ms between iterations = ~60 Google Sheets writes/minute.\nGoogle Sheets quota is 300 writes/minute, so this keeps us at 20% of the limit.\nIncrease to 1000ms if you still see quota errors; decrease to 200ms if you want faster throughput and your quota allows it."
     },
     {
       "parameters": {
@@ -168,6 +183,9 @@
       "main": [[{ "node": "✅ Update Row Status", "type": "main", "index": 0 }]]
     },
     "✅ Update Row Status": {
+      "main": [[{ "node": "⏳ Rate Limit Pause", "type": "main", "index": 0 }]]
+    },
+    "⏳ Rate Limit Pause": {
       "main": [[{ "node": "🔁 Loop (1 user at a time)", "type": "main", "index": 0 }]]
     }
   },
