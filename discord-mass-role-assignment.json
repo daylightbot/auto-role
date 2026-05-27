@@ -3,23 +3,23 @@
   "nodes": [
     {
       "parameters": {},
-      "id": "a1b2c3d4-0001-0001-0001-000000000001",
+      "id": "a1b2c3d4-0003-0001-0001-000000000001",
       "name": "▶ Run Manually",
       "type": "n8n-nodes-base.manualTrigger",
       "typeVersion": 1,
-      "position": [200, 500]
+      "position": [200, 480]
     },
     {
       "parameters": {
         "rule": {
-          "interval": [{ "field": "minutes", "minutesInterval": 10 }]
+          "interval": [{ "field": "minutes", "minutesInterval": 5 }]
         }
       },
-      "id": "a1b2c3d4-0001-0001-0001-000000000002",
-      "name": "⏰ Schedule (every 10 min)",
+      "id": "a1b2c3d4-0003-0001-0001-000000000002",
+      "name": "⏰ Schedule (every 5 min)",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
-      "position": [200, 300]
+      "position": [200, 280]
     },
     {
       "parameters": {
@@ -28,11 +28,11 @@
         "sheetName":  { "__rl": true, "value": "Config", "mode": "name" },
         "options": {}
       },
-      "id": "a1b2c3d4-0001-0001-0001-000000000003",
+      "id": "a1b2c3d4-0003-0001-0001-000000000003",
       "name": "📋 Read Config",
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4.4,
-      "position": [460, 400],
+      "position": [460, 380],
       "credentials": {
         "googleSheetsOAuth2Api": { "id": "YOUR_GOOGLE_CREDENTIAL_ID", "name": "Google Sheets account" }
       }
@@ -42,28 +42,19 @@
         "operation": "read",
         "documentId": { "__rl": true, "value": "YOUR_SPREADSHEET_ID", "mode": "id" },
         "sheetName":  { "__rl": true, "value": "Users", "mode": "name" },
-        "filtersUI": {
-          "values": [{ "lookupColumn": "status", "lookupValue": "" }]
-        },
-        "options": { "returnRowNumbers": true }
+        "options": {
+          "range": "=A{{ parseInt($('📋 Read Config').first().json.checkpoint) + 2 }}:A{{ parseInt($('📋 Read Config').first().json.checkpoint) + 301 }}"
+        }
       },
-      "id": "a1b2c3d4-0001-0001-0001-000000000004",
-      "name": "👥 Get Pending Users",
+      "id": "a1b2c3d4-0003-0001-0001-000000000004",
+      "name": "📥 Read Next Batch",
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4.4,
-      "position": [680, 400],
+      "position": [700, 380],
       "credentials": {
         "googleSheetsOAuth2Api": { "id": "YOUR_GOOGLE_CREDENTIAL_ID", "name": "Google Sheets account" }
-      }
-    },
-    {
-      "parameters": { "batchSize": 50, "options": {} },
-      "id": "a1b2c3d4-0001-0001-0001-000000000005",
-      "name": "🔁 Loop (50 users)",
-      "type": "n8n-nodes-base.splitInBatches",
-      "typeVersion": 3,
-      "position": [900, 400],
-      "notes": "'done' output (index 0) → leave UNCONNECTED.\n'loop' output (index 1) → Add Discord Role.\nLoop runs because Sheets Delay connects back to this node's INPUT."
+      },
+      "notes": "Reads up to 300 users starting at checkpoint+2 (row 1 is header, checkpoint counts data rows processed).\nIf this returns 0 rows the workflow stops — Discord and Checkpoint nodes never run."
     },
     {
       "parameters": {
@@ -85,124 +76,90 @@
           "mode": "id"
         }
       },
-      "id": "a1b2c3d4-0001-0001-0001-000000000006",
+      "id": "a1b2c3d4-0003-0001-0001-000000000005",
       "name": "🎭 Add Discord Role",
       "type": "n8n-nodes-base.discord",
       "typeVersion": 2,
-      "position": [1120, 400],
+      "position": [940, 380],
       "continueOnFail": true,
       "credentials": {
         "discordBotApi": { "id": "YOUR_DISCORD_CREDENTIAL_ID", "name": "Discord Bot account" }
       },
-      "notes": "Processes all 50 items in the batch. continueOnFail captures errors without crashing."
+      "notes": "Processes all items in the batch sequentially. continueOnFail means individual Discord errors\n(user not in server, permission issues) do not crash the batch — those users are skipped and\nthe checkpoint still advances past them."
     },
     {
       "parameters": {
-        "batchSize": 1,
-        "options": {}
+        "jsCode": "// Runs ONCE for the entire batch (not once per item).\n// Counts how many users were just processed and computes the new checkpoint.\n// Failed Discord calls still count — checkpoint advances past them.\nconst processed = $input.all().length;\nconst config    = $('📋 Read Config').first().json;\nreturn [{\n  json: {\n    guild_id:   config.guild_id,\n    checkpoint: parseInt(config.checkpoint) + processed\n  }\n}];",
+        "mode": "runOnceForAllItems"
       },
-      "id": "a1b2c3d4-0001-0001-0001-000000000007",
-      "name": "🔂 One Sheets Write at a Time",
-      "type": "n8n-nodes-base.splitInBatches",
-      "typeVersion": 3,
-      "position": [1340, 400],
-      "notes": "Feeds the 50 Discord results into the Sheets update one row at a time.\n'loop' output (index 1) → Sheets Delay → Update Row Status → back to THIS node's input.\n'done' output (index 0) → back to the outer Loop node's input."
-    },
-    {
-      "parameters": {
-        "resume": "timeInterval",
-        "amount": 1,
-        "unit": "seconds"
-      },
-      "id": "a1b2c3d4-0001-0001-0001-000000000008",
-      "name": "⏳ Sheets Delay (1 sec)",
-      "type": "n8n-nodes-base.wait",
-      "typeVersion": 1.1,
-      "position": [1560, 260],
-      "webhookId": "sheets-delay",
-      "notes": "1 second between each Sheets write = max 60 writes/minute, well under quota.\nIncrease to 2s if you still see quota errors."
+      "id": "a1b2c3d4-0003-0001-0001-000000000006",
+      "name": "🔢 Compute New Checkpoint",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1180, 380],
+      "notes": "Collapses all N batch items into a single item with the new checkpoint value.\nThis ensures Advance Checkpoint writes exactly ONE row to Sheets per batch — no quota issues."
     },
     {
       "parameters": {
         "operation": "update",
         "documentId": { "__rl": true, "value": "YOUR_SPREADSHEET_ID", "mode": "id" },
-        "sheetName":  { "__rl": true, "value": "Users", "mode": "name" },
+        "sheetName":  { "__rl": true, "value": "Config", "mode": "name" },
         "columns": {
           "mappingMode": "defineBelow",
           "value": {
-            "row_number": "={{ $('🔁 Loop (50 users)').first().json.row_number }}",
-            "status":     "={{ $json.error ? 'failed' : 'done' }}",
-            "timestamp":  "={{ $now.toISO() }}",
-            "error":      "={{ $json.error ? $json.error.toString().substring(0, 200) : '' }}"
+            "guild_id":   "={{ $json.guild_id }}",
+            "checkpoint": "={{ $json.checkpoint }}"
           },
-          "matchingColumns": ["row_number"],
+          "matchingColumns": ["guild_id"],
           "schema": [
-            { "id": "row_number", "displayName": "row_number", "required": false, "defaultMatch": true,  "display": true, "type": "string", "canBeUsedToMatch": true  },
-            { "id": "status",     "displayName": "status",     "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false },
-            { "id": "timestamp",  "displayName": "timestamp",  "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false },
-            { "id": "error",      "displayName": "error",      "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false }
+            { "id": "guild_id",   "displayName": "guild_id",   "required": false, "defaultMatch": true,  "display": true, "type": "string", "canBeUsedToMatch": true  },
+            { "id": "checkpoint", "displayName": "checkpoint", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false }
           ]
         },
         "options": {}
       },
-      "id": "a1b2c3d4-0001-0001-0001-000000000009",
-      "name": "✅ Update Row Status",
+      "id": "a1b2c3d4-0003-0001-0001-000000000007",
+      "name": "✅ Advance Checkpoint",
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4.4,
-      "position": [1780, 260],
-      "continueOnFail": true,
+      "position": [1420, 380],
       "credentials": {
         "googleSheetsOAuth2Api": { "id": "YOUR_GOOGLE_CREDENTIAL_ID", "name": "Google Sheets account" }
       },
-      "notes": "Updates one row at a time, paced by the 1-second Wait above.\ncontinueOnFail: a transient quota error leaves the row blank for retry rather than crashing."
+      "notes": "ONE Sheets write per batch of 300 users — far under any quota limit.\nMatches the Config row by guild_id and updates only the checkpoint column."
     },
     {
       "parameters": {
-        "content": "## Discord Mass Role Assignment\n\n### Flow\n```\n[Trigger]\n  → Read Config\n  → Get Pending Users\n  → Outer Loop (50 users per batch)\n      → Add Discord Role   (all 50, fast)\n      → Inner Loop (1 at a time for Sheets)\n          → Sheets Delay   (1 sec throttle)\n          → Update Row Status\n          → back to Inner Loop\n      → back to Outer Loop\n```\n\n**Why two loops?**\nDiscord can handle 50 calls in a batch quickly.\nGoogle Sheets write quota (~60/min) means we must write one row\nat a time with a 1-second gap. The inner loop paces only the\nSheets writes — Discord runs at full speed.\n\n**Loop outputs:**\n- Outer loop 'done' (index 0) → UNCONNECTED\n- Outer loop 'loop' (index 1) → Add Discord Role\n- Inner loop 'done' (index 0) → back to Outer Loop INPUT\n- Inner loop 'loop' (index 1) → Sheets Delay\n\n---\n\n### Google Sheets layout\n**Config tab — one data row:**\n| guild_id | role_id |\n|----------|---------|\n| 123...   | 987...  |\n\n**Users tab:**\n| user_id | status | timestamp | error |\n\n---\n\n### Setup checklist\n- [ ] Replace `YOUR_SPREADSHEET_ID` on Read Config,\n      Get Pending Users, Update Row Status\n- [ ] Set Google Sheets credential on those nodes\n- [ ] Set Discord Bot credential on Add Discord Role\n- [ ] Bot has MANAGE_ROLES above target role\n\n---\n\n### Throughput\n50 Discord calls per outer batch · 1 Sheets write/sec\n~60 rows/min · 10k ≈ 2.5 hrs · 600k ≈ 7 days (background)",
-        "height": 720,
-        "width": 520,
+        "content": "## Discord Mass Role Assignment\n\n### Flow\n```\n[Trigger]\n  → Read Config         (guild_id, role_id, checkpoint)\n  → Read Next Batch     (300 users from checkpoint)\n  → Add Discord Role    (all items, continueOnFail)\n  → Compute Checkpoint  (collapse to 1 item)\n  → Advance Checkpoint  (1 Sheets write per batch)\n```\n\n**Resume logic:**\nThe `checkpoint` column in Config stores how many users\nhave been processed. Each run reads the next 300 rows\nfrom that offset. If the batch is empty (all done), the\nworkflow stops naturally — Discord and Checkpoint nodes\nnever execute.\n\n**Google Sheets writes:** 1 per batch of 300 users.\nNo quota issues. No delay nodes needed.\n\n**Discord rate limiting:** The Discord node handles\n429s automatically using retry-after. A batch of 300\ntypically takes 1–3 min. The 5-min schedule gives a\nsafe buffer. Set Max Concurrent Executions = 1 in\nWorkflow Settings to prevent overlapping runs.\n\n---\n\n### Google Sheets layout\n\n**Config tab — one data row:**\n| guild_id | role_id | checkpoint |\n|----------|---------|------------|\n| 123...   | 987...  | 0          |\n\n- checkpoint = 0 means start from row 2 (first user)\n- After each batch it increments by the batch count\n- To resume from user N, set checkpoint = N\n- Column names must be exactly as shown\n\n**Users tab — one column only:**\n| user_id |\n|---------|\n| 111...  |\n| 222...  |\n\nRow 1 = header. Data starts at row 2.\nNo status column — checkpoint tracks position.\n\n---\n\n### Setup checklist\n- [ ] Replace YOUR_SPREADSHEET_ID on Read Config,\n      Read Next Batch, and Advance Checkpoint\n- [ ] Set Google Sheets credential on those 3 nodes\n- [ ] Set Discord Bot credential on Add Discord Role\n- [ ] Bot has MANAGE_ROLES, sits above target role\n- [ ] Config checkpoint starts at 0\n- [ ] Workflow Settings → Max concurrent executions = 1\n\n---\n\n### Throughput\n300 users/batch · Discord ~5/sec · ~1 min to run\nSchedule every 5 min = 18,000 users/hr\n10k ≈ 35 min  ·  600k ≈ 33 hrs background\n\nTo go faster: change 301 → 501 in Read Next Batch\nrange and schedule to every 8 min.",
+        "height": 920,
+        "width": 580,
         "color": 5
       },
-      "id": "a1b2c3d4-0001-0001-0001-000000000010",
+      "id": "a1b2c3d4-0003-0001-0001-000000000008",
       "name": "📖 Setup Notes",
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
-      "position": [200, -420]
+      "position": [200, -580]
     }
   ],
   "connections": {
     "▶ Run Manually": {
       "main": [[{ "node": "📋 Read Config", "type": "main", "index": 0 }]]
     },
-    "⏰ Schedule (every 10 min)": {
+    "⏰ Schedule (every 5 min)": {
       "main": [[{ "node": "📋 Read Config", "type": "main", "index": 0 }]]
     },
     "📋 Read Config": {
-      "main": [[{ "node": "👥 Get Pending Users", "type": "main", "index": 0 }]]
+      "main": [[{ "node": "📥 Read Next Batch", "type": "main", "index": 0 }]]
     },
-    "👥 Get Pending Users": {
-      "main": [[{ "node": "🔁 Loop (50 users)", "type": "main", "index": 0 }]]
-    },
-    "🔁 Loop (50 users)": {
-      "main": [
-        [],
-        [{ "node": "🎭 Add Discord Role", "type": "main", "index": 0 }]
-      ]
+    "📥 Read Next Batch": {
+      "main": [[{ "node": "🎭 Add Discord Role", "type": "main", "index": 0 }]]
     },
     "🎭 Add Discord Role": {
-      "main": [[{ "node": "🔂 One Sheets Write at a Time", "type": "main", "index": 0 }]]
+      "main": [[{ "node": "🔢 Compute New Checkpoint", "type": "main", "index": 0 }]]
     },
-    "🔂 One Sheets Write at a Time": {
-      "main": [
-        [{ "node": "🔁 Loop (50 users)", "type": "main", "index": 0 }],
-        [{ "node": "⏳ Sheets Delay (1 sec)", "type": "main", "index": 0 }]
-      ]
-    },
-    "⏳ Sheets Delay (1 sec)": {
-      "main": [[{ "node": "✅ Update Row Status", "type": "main", "index": 0 }]]
-    },
-    "✅ Update Row Status": {
-      "main": [[{ "node": "🔂 One Sheets Write at a Time", "type": "main", "index": 0 }]]
+    "🔢 Compute New Checkpoint": {
+      "main": [[{ "node": "✅ Advance Checkpoint", "type": "main", "index": 0 }]]
     }
   },
   "active": false,
