@@ -2,12 +2,25 @@
   "name": "Discord Mass Role Assignment",
   "nodes": [
     {
+      "parameters": {
+        "content": "## Discord Mass Role Assignment\n\n### Flow\n```\n[Trigger every 5 min]\n → Read Config        (checkpoint from Config tab)\n → Read User Batch    (next 250 rows from Users tab)\n → Normalize IDs      (extract user_id from each row)\n → Loop Over Items    (10 users per cycle)\n     → Assign Role    (Discord, continues past errors)\n     → Throttle 6s    (stay under Discord rate limits)\n → Compute Summary    (counts + failed users)\n → Advance Checkpoint (1 Sheets write)\n → Append Run Log     (1 Sheets write)\n → Append Failures    (1 Sheets write, only if any failed)\n```\n\n### Resume logic\n`checkpoint` in the Config tab = number of Users rows\nalready processed. Every run reads the next 250 rows from\nthat offset and advances the checkpoint once at the end.\nWhen no rows are left, the run stops after Read User Batch\nand nothing else executes — deactivate the workflow then.\n\nRole-adds are idempotent: re-assigning a role a user\nalready has is harmless, so a crashed run simply redoes\nat most one 250-row batch on the next tick.\n\n### Why the range starts one row early\nThe Sheets node treats the first row of an explicit A1\nrange as the column header. The range therefore starts at\ncheckpoint+1: on the first batch that row is the real\nheader, afterwards it is the last already-processed user.\nNormalize IDs reads the single cell positionally, so the\nvarying header name does not matter.\n\n### Setup (see README for detail)\n- [ ] Replace YOUR_SPREADSHEET_ID on all 5 Sheets nodes\n- [ ] Set Google Sheets credential on those 5 nodes\n- [ ] Set Discord Bot credential on Assign Role\n- [ ] Open Assign Role → pick Server + Role from dropdowns\n- [ ] Users tab column formatted as PLAIN TEXT (critical —\n      Sheets corrupts 18-digit IDs stored as numbers)\n- [ ] checkpoint = 0 in Config tab, then activate\n\n### Sheets writes per run: ≤3 (quota-safe)\n### Throughput: 250 users / 5 min ≈ 72k/day ≈ 8 days for 570k\nTune up only if the Failures tab stays free of 429 errors.",
+        "height": 1060,
+        "width": 520,
+        "color": 5
+      },
+      "id": "f2e1d0c9-0001-4000-8000-000000000001",
+      "name": "Setup Notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-560, -220]
+    },
+    {
       "parameters": {},
-      "id": "a1b2c3d4-0003-0001-0001-000000000001",
-      "name": "▶ Run Manually",
+      "id": "f2e1d0c9-0001-4000-8000-000000000002",
+      "name": "Run Manually",
       "type": "n8n-nodes-base.manualTrigger",
       "typeVersion": 1,
-      "position": [200, 480]
+      "position": [0, 420]
     },
     {
       "parameters": {
@@ -15,46 +28,75 @@
           "interval": [{ "field": "minutes", "minutesInterval": 5 }]
         }
       },
-      "id": "a1b2c3d4-0003-0001-0001-000000000002",
-      "name": "⏰ Schedule (every 5 min)",
+      "id": "f2e1d0c9-0001-4000-8000-000000000003",
+      "name": "Every 5 Minutes",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
-      "position": [200, 280]
+      "position": [0, 180]
     },
     {
       "parameters": {
         "operation": "read",
         "documentId": { "__rl": true, "value": "YOUR_SPREADSHEET_ID", "mode": "id" },
-        "sheetName":  { "__rl": true, "value": "Config", "mode": "name" },
+        "sheetName": { "__rl": true, "value": "Config", "mode": "name" },
         "options": {}
       },
-      "id": "a1b2c3d4-0003-0001-0001-000000000003",
-      "name": "📋 Read Config",
+      "id": "f2e1d0c9-0001-4000-8000-000000000004",
+      "name": "Read Config",
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4.4,
-      "position": [460, 380],
+      "position": [260, 300],
       "credentials": {
         "googleSheetsOAuth2Api": { "id": "YOUR_GOOGLE_CREDENTIAL_ID", "name": "Google Sheets account" }
-      }
+      },
+      "notes": "Config tab has two columns (name, value) and one data row: checkpoint | 0"
     },
     {
       "parameters": {
         "operation": "read",
         "documentId": { "__rl": true, "value": "YOUR_SPREADSHEET_ID", "mode": "id" },
-        "sheetName":  { "__rl": true, "value": "Users", "mode": "name" },
+        "sheetName": { "__rl": true, "value": "Users", "mode": "name" },
         "options": {
-          "range": "=A{{ parseInt($('📋 Read Config').first().json.checkpoint) + 2 }}:A{{ parseInt($('📋 Read Config').first().json.checkpoint) + 301 }}"
+          "dataLocationOnSheet": {
+            "values": {
+              "rangeDefinition": "specifyRangeA1",
+              "range": "=A{{ (parseInt($('Read Config').first().json.value, 10) || 0) + 1 }}:A{{ (parseInt($('Read Config').first().json.value, 10) || 0) + 251 }}"
+            }
+          }
         }
       },
-      "id": "a1b2c3d4-0003-0001-0001-000000000004",
-      "name": "📥 Read Next Batch",
+      "id": "f2e1d0c9-0001-4000-8000-000000000005",
+      "name": "Read User Batch",
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4.4,
-      "position": [700, 380],
+      "position": [480, 300],
       "credentials": {
         "googleSheetsOAuth2Api": { "id": "YOUR_GOOGLE_CREDENTIAL_ID", "name": "Google Sheets account" }
       },
-      "notes": "Reads up to 300 users starting at checkpoint+2 (row 1 is header, checkpoint counts data rows processed).\nIf this returns 0 rows the workflow stops — Discord and Checkpoint nodes never run."
+      "notes": "Reads 251 rows: 1 header/overlap row + up to 250 users. The range starts one row EARLY on purpose — the Sheets node consumes the first row of an explicit range as the column header. That row is either the real header (first batch) or a user that was already processed. When 0 data rows come back, the workflow stops here."
+    },
+    {
+      "parameters": {
+        "jsCode": "// The range read deliberately starts ONE ROW EARLY: the Sheets node treats the\n// first row of an explicit A1 range as the column header. On the first batch\n// that row is the real header (\"user_id\"); on every later batch it is the last\n// already-processed user. Either way it is not data, so nothing is lost.\n//\n// Each remaining item carries exactly one cell: the user ID. The key varies\n// between batches (it is whatever the \"header\" row contained), so grab the\n// value positionally instead of by name, ignoring n8n's row_number metadata.\n//\n// No filtering here — every row read must become exactly one item, so that the\n// checkpoint (advanced by rows read) can never drift from what was attempted.\n// Blank or malformed rows simply fail at the Discord node and land in the\n// Failures tab.\nreturn $input.all().map((item) => {\n  const values = Object.entries(item.json)\n    .filter(([key]) => key !== 'row_number')\n    .map(([, v]) => v);\n  const raw = values[0];\n  const user_id = typeof raw === 'number' ? raw.toFixed(0) : String(raw ?? '').trim();\n  return { json: { user_id } };\n});",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "f2e1d0c9-0001-4000-8000-000000000006",
+      "name": "Normalize IDs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [700, 300]
+    },
+    {
+      "parameters": {
+        "batchSize": 10,
+        "options": {}
+      },
+      "id": "f2e1d0c9-0001-4000-8000-000000000007",
+      "name": "Loop Over Items",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [920, 300],
+      "notes": "10 users per cycle, followed by a 6-second Throttle → sustained pace of roughly 1.1 requests/second, just under Discord's observed ~10-per-10s bucket for the add-role route."
     },
     {
       "parameters": {
@@ -62,104 +104,204 @@
         "operation": "roleAdd",
         "guildId": {
           "__rl": true,
-          "value": "={{ $('📋 Read Config').first().json.guild_id }}",
-          "mode": "id"
+          "value": "",
+          "mode": "list",
+          "cachedResultName": ""
         },
         "userId": {
           "__rl": true,
           "value": "={{ $json.user_id }}",
           "mode": "id"
         },
-        "roleId": {
-          "__rl": true,
-          "value": "={{ $('📋 Read Config').first().json.role_id }}",
-          "mode": "id"
-        }
+        "role": []
       },
-      "id": "a1b2c3d4-0003-0001-0001-000000000005",
-      "name": "🎭 Add Discord Role",
+      "id": "f2e1d0c9-0001-4000-8000-000000000008",
+      "name": "Assign Role",
       "type": "n8n-nodes-base.discord",
       "typeVersion": 2,
-      "position": [940, 380],
-      "continueOnFail": true,
+      "position": [1160, 420],
+      "onError": "continueRegularOutput",
       "credentials": {
         "discordBotApi": { "id": "YOUR_DISCORD_CREDENTIAL_ID", "name": "Discord Bot account" }
       },
-      "notes": "Processes all items in the batch sequentially. continueOnFail means individual Discord errors\n(user not in server, permission issues) do not crash the batch — those users are skipped and\nthe checkpoint still advances past them."
+      "notes": "Open this node once after import: pick your Server and the Role from the dropdowns (they load from your bot credential). User ID comes from the sheet via expression. onError = continue: users who left the server, malformed IDs etc. flow through with an error field and are written to the Failures tab — they never stop the run."
     },
     {
       "parameters": {
-        "jsCode": "// Runs ONCE for the entire batch (not once per item).\n// Counts how many users were just processed and computes the new checkpoint.\n// Failed Discord calls still count — checkpoint advances past them.\nconst processed = $input.all().length;\nconst config    = $('📋 Read Config').first().json;\nreturn [{\n  json: {\n    guild_id:   config.guild_id,\n    checkpoint: parseInt(config.checkpoint) + processed\n  }\n}];",
+        "amount": 6,
+        "unit": "seconds"
+      },
+      "id": "f2e1d0c9-0001-4000-8000-000000000009",
+      "name": "Throttle",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [1380, 420],
+      "webhookId": "f2e1d0c9-0001-4000-8000-00000000000a",
+      "notes": "6s pause after every 10 users. Lower this only if the Failures tab stays free of 429 / rate-limit errors."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Runs once, on the Loop's `done` output, which carries the accumulated\n// Discord results from every cycle in original order (1:1 with Normalize IDs —\n// onError=continue means failed items still emit exactly one item).\n//\n// The checkpoint advances by ROWS READ from the sheet, not by successes, so a\n// bad row can never wedge the run into re-reading the same batch forever.\n// Failed users are recorded in the Failures tab instead and can be re-run\n// later.\nconst results = $input.all();\nconst sources = $('Normalize IDs').all();\nconst rowsRead = $('Read User Batch').all().length;\nconst checkpoint = parseInt($('Read Config').first().json.value, 10) || 0;\n\nconst failures = [];\nresults.forEach((item, i) => {\n  if (item.json.error !== undefined) {\n    failures.push({\n      user_id: sources[i] ? sources[i].json.user_id : 'unknown',\n      error: typeof item.json.error === 'string' ? item.json.error : JSON.stringify(item.json.error),\n    });\n  }\n});\n\nreturn [{\n  json: {\n    timestamp: new Date().toISOString(),\n    checkpoint_before: checkpoint,\n    rows_read: rowsRead,\n    attempted: results.length,\n    succeeded: results.length - failures.length,\n    failed: failures.length,\n    new_checkpoint: checkpoint + rowsRead,\n    failures,\n  },\n}];",
         "mode": "runOnceForAllItems"
       },
-      "id": "a1b2c3d4-0003-0001-0001-000000000006",
-      "name": "🔢 Compute New Checkpoint",
+      "id": "f2e1d0c9-0001-4000-8000-00000000000b",
+      "name": "Compute Summary",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1180, 380],
-      "notes": "Collapses all N batch items into a single item with the new checkpoint value.\nThis ensures Advance Checkpoint writes exactly ONE row to Sheets per batch — no quota issues."
+      "position": [1160, 140]
     },
     {
       "parameters": {
         "operation": "update",
         "documentId": { "__rl": true, "value": "YOUR_SPREADSHEET_ID", "mode": "id" },
-        "sheetName":  { "__rl": true, "value": "Config", "mode": "name" },
+        "sheetName": { "__rl": true, "value": "Config", "mode": "name" },
         "columns": {
           "mappingMode": "defineBelow",
           "value": {
-            "guild_id":   "={{ $json.guild_id }}",
-            "checkpoint": "={{ $json.checkpoint }}"
+            "name": "checkpoint",
+            "value": "={{ $json.new_checkpoint }}"
           },
-          "matchingColumns": ["guild_id"],
+          "matchingColumns": ["name"],
           "schema": [
-            { "id": "guild_id",   "displayName": "guild_id",   "required": false, "defaultMatch": true,  "display": true, "type": "string", "canBeUsedToMatch": true  },
-            { "id": "checkpoint", "displayName": "checkpoint", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false }
+            { "id": "name", "displayName": "name", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "value", "displayName": "value", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false }
           ]
         },
         "options": {}
       },
-      "id": "a1b2c3d4-0003-0001-0001-000000000007",
-      "name": "✅ Advance Checkpoint",
+      "id": "f2e1d0c9-0001-4000-8000-00000000000c",
+      "name": "Advance Checkpoint",
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4.4,
-      "position": [1420, 380],
+      "position": [1400, 40],
       "credentials": {
         "googleSheetsOAuth2Api": { "id": "YOUR_GOOGLE_CREDENTIAL_ID", "name": "Google Sheets account" }
       },
-      "notes": "ONE Sheets write per batch of 300 users — far under any quota limit.\nMatches the Config row by guild_id and updates only the checkpoint column."
+      "notes": "ONE Sheets write per 250-user batch. Matches the Config row where name = checkpoint."
     },
     {
       "parameters": {
-        "content": "## Discord Mass Role Assignment\n\n### Flow\n```\n[Trigger]\n  → Read Config         (guild_id, role_id, checkpoint)\n  → Read Next Batch     (300 users from checkpoint)\n  → Add Discord Role    (all items, continueOnFail)\n  → Compute Checkpoint  (collapse to 1 item)\n  → Advance Checkpoint  (1 Sheets write per batch)\n```\n\n**Resume logic:**\nThe `checkpoint` column in Config stores how many users\nhave been processed. Each run reads the next 300 rows\nfrom that offset. If the batch is empty (all done), the\nworkflow stops naturally — Discord and Checkpoint nodes\nnever execute.\n\n**Google Sheets writes:** 1 per batch of 300 users.\nNo quota issues. No delay nodes needed.\n\n**Discord rate limiting:** The Discord node handles\n429s automatically using retry-after. A batch of 300\ntypically takes 1–3 min. The 5-min schedule gives a\nsafe buffer. Set Max Concurrent Executions = 1 in\nWorkflow Settings to prevent overlapping runs.\n\n---\n\n### Google Sheets layout\n\n**Config tab — one data row:**\n| guild_id | role_id | checkpoint |\n|----------|---------|------------|\n| 123...   | 987...  | 0          |\n\n- checkpoint = 0 means start from row 2 (first user)\n- After each batch it increments by the batch count\n- To resume from user N, set checkpoint = N\n- Column names must be exactly as shown\n\n**Users tab — one column only:**\n| user_id |\n|---------|\n| 111...  |\n| 222...  |\n\nRow 1 = header. Data starts at row 2.\nNo status column — checkpoint tracks position.\n\n---\n\n### Setup checklist\n- [ ] Replace YOUR_SPREADSHEET_ID on Read Config,\n      Read Next Batch, and Advance Checkpoint\n- [ ] Set Google Sheets credential on those 3 nodes\n- [ ] Set Discord Bot credential on Add Discord Role\n- [ ] Bot has MANAGE_ROLES, sits above target role\n- [ ] Config checkpoint starts at 0\n- [ ] Workflow Settings → Max concurrent executions = 1\n\n---\n\n### Throughput\n300 users/batch · Discord ~5/sec · ~1 min to run\nSchedule every 5 min = 18,000 users/hr\n10k ≈ 35 min  ·  600k ≈ 33 hrs background\n\nTo go faster: change 301 → 501 in Read Next Batch\nrange and schedule to every 8 min.",
-        "height": 920,
-        "width": 580,
-        "color": 5
+        "operation": "append",
+        "documentId": { "__rl": true, "value": "YOUR_SPREADSHEET_ID", "mode": "id" },
+        "sheetName": { "__rl": true, "value": "Log", "mode": "name" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "timestamp": "={{ $('Compute Summary').first().json.timestamp }}",
+            "checkpoint_before": "={{ $('Compute Summary').first().json.checkpoint_before }}",
+            "attempted": "={{ $('Compute Summary').first().json.attempted }}",
+            "succeeded": "={{ $('Compute Summary').first().json.succeeded }}",
+            "failed": "={{ $('Compute Summary').first().json.failed }}",
+            "new_checkpoint": "={{ $('Compute Summary').first().json.new_checkpoint }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            { "id": "timestamp", "displayName": "timestamp", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false },
+            { "id": "checkpoint_before", "displayName": "checkpoint_before", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false },
+            { "id": "attempted", "displayName": "attempted", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false },
+            { "id": "succeeded", "displayName": "succeeded", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false },
+            { "id": "failed", "displayName": "failed", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false },
+            { "id": "new_checkpoint", "displayName": "new_checkpoint", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false }
+          ]
+        },
+        "options": {}
       },
-      "id": "a1b2c3d4-0003-0001-0001-000000000008",
-      "name": "📖 Setup Notes",
-      "type": "n8n-nodes-base.stickyNote",
-      "typeVersion": 1,
-      "position": [200, -580]
+      "id": "f2e1d0c9-0001-4000-8000-00000000000d",
+      "name": "Append Run Log",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.4,
+      "position": [1640, 40],
+      "credentials": {
+        "googleSheetsOAuth2Api": { "id": "YOUR_GOOGLE_CREDENTIAL_ID", "name": "Google Sheets account" }
+      },
+      "notes": "One heartbeat row per run — watch this tab to confirm the workflow is alive and progressing. When rows stop appearing, the list is finished."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Turns the summary's failures array into one item per failed user.\n// If nothing failed this returns an empty array and the Append Failures node\n// simply never executes — zero Sheets calls wasted.\nconst s = $input.first().json;\nreturn (s.failures || []).map((f) => ({\n  json: {\n    timestamp: s.timestamp,\n    user_id: f.user_id,\n    error: f.error,\n    checkpoint_batch: s.checkpoint_before,\n  },\n}));",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "f2e1d0c9-0001-4000-8000-00000000000e",
+      "name": "Split Out Failures",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1400, 240]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": { "__rl": true, "value": "YOUR_SPREADSHEET_ID", "mode": "id" },
+        "sheetName": { "__rl": true, "value": "Failures", "mode": "name" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "timestamp": "={{ $json.timestamp }}",
+            "user_id": "={{ $json.user_id }}",
+            "error": "={{ $json.error }}",
+            "checkpoint_batch": "={{ $json.checkpoint_batch }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            { "id": "timestamp", "displayName": "timestamp", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false },
+            { "id": "user_id", "displayName": "user_id", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false },
+            { "id": "error", "displayName": "error", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false },
+            { "id": "checkpoint_batch", "displayName": "checkpoint_batch", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false }
+          ]
+        },
+        "options": {}
+      },
+      "id": "f2e1d0c9-0001-4000-8000-00000000000f",
+      "name": "Append Failures",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.4,
+      "position": [1640, 240],
+      "credentials": {
+        "googleSheetsOAuth2Api": { "id": "YOUR_GOOGLE_CREDENTIAL_ID", "name": "Google Sheets account" }
+      },
+      "notes": "All failed rows of a batch are appended in one API call. 429 / rate-limit errors here mean you tuned the throttle too aggressively — those users are safe to re-run."
     }
   ],
   "connections": {
-    "▶ Run Manually": {
-      "main": [[{ "node": "📋 Read Config", "type": "main", "index": 0 }]]
+    "Run Manually": {
+      "main": [[{ "node": "Read Config", "type": "main", "index": 0 }]]
     },
-    "⏰ Schedule (every 5 min)": {
-      "main": [[{ "node": "📋 Read Config", "type": "main", "index": 0 }]]
+    "Every 5 Minutes": {
+      "main": [[{ "node": "Read Config", "type": "main", "index": 0 }]]
     },
-    "📋 Read Config": {
-      "main": [[{ "node": "📥 Read Next Batch", "type": "main", "index": 0 }]]
+    "Read Config": {
+      "main": [[{ "node": "Read User Batch", "type": "main", "index": 0 }]]
     },
-    "📥 Read Next Batch": {
-      "main": [[{ "node": "🎭 Add Discord Role", "type": "main", "index": 0 }]]
+    "Read User Batch": {
+      "main": [[{ "node": "Normalize IDs", "type": "main", "index": 0 }]]
     },
-    "🎭 Add Discord Role": {
-      "main": [[{ "node": "🔢 Compute New Checkpoint", "type": "main", "index": 0 }]]
+    "Normalize IDs": {
+      "main": [[{ "node": "Loop Over Items", "type": "main", "index": 0 }]]
     },
-    "🔢 Compute New Checkpoint": {
-      "main": [[{ "node": "✅ Advance Checkpoint", "type": "main", "index": 0 }]]
+    "Loop Over Items": {
+      "main": [
+        [{ "node": "Compute Summary", "type": "main", "index": 0 }],
+        [{ "node": "Assign Role", "type": "main", "index": 0 }]
+      ]
+    },
+    "Assign Role": {
+      "main": [[{ "node": "Throttle", "type": "main", "index": 0 }]]
+    },
+    "Throttle": {
+      "main": [[{ "node": "Loop Over Items", "type": "main", "index": 0 }]]
+    },
+    "Compute Summary": {
+      "main": [
+        [
+          { "node": "Advance Checkpoint", "type": "main", "index": 0 },
+          { "node": "Split Out Failures", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Advance Checkpoint": {
+      "main": [[{ "node": "Append Run Log", "type": "main", "index": 0 }]]
+    },
+    "Split Out Failures": {
+      "main": [[{ "node": "Append Failures", "type": "main", "index": 0 }]]
     }
   },
   "active": false,
